@@ -23,10 +23,15 @@
 namespace EasyNetwork
 {
     using System;
-    using System.Collections.Concurrent;
     using System.Threading;
 
     using NetMQ;
+
+    /// <summary>
+    /// Delegate signature used for setting up DataReceived event
+    /// </summary>
+    /// <param name="receivedObject">The object received from the server</param>
+    public delegate void ObjectReceived(Object receivedObject);
 
     /// <summary>
     /// Client class which can send and receive objects to/from a Server
@@ -45,9 +50,6 @@ namespace EasyNetwork
         /// <summary> Flag used to know when to shut down listener thread </summary>
         private bool isDone = false;
 
-        /// <summary> Queue used for queuing up received messages from the server </summary>
-        private ConcurrentQueue<NetMQMessage> receiveQueue = new ConcurrentQueue<NetMQMessage>();
-
         /// <summary>
         /// Initializes a new instance of the Client class
         /// </summary>
@@ -62,6 +64,9 @@ namespace EasyNetwork
             clientSocket.Options.Identity = Id.ToByteArray();
             clientSocket.Connect(clientConnectionString);                    
         }
+
+        /// <summary> Event triggered each time the client receives an object from the server </summary>
+        public event ObjectReceived DataReceived;
 
         /// <summary> Gets this client's ID </summary>
         public Guid Id { get; private set; }
@@ -106,32 +111,6 @@ namespace EasyNetwork
         }
 
         /// <summary>
-        /// Receive an object (if available) from the server
-        /// </summary>
-        /// <returns>The object received, or null if there was nothing to receive</returns>
-        public Object Receive()
-        {
-            NetMQMessage receivedMessage = null;
-
-            if (receiveQueue.TryDequeue(out receivedMessage))
-            {
-                string typeStr = receivedMessage[1].ConvertToString();
-                Type objectType = Type.GetType(typeStr);
-
-                System.Reflection.MethodInfo method = typeof(BsonMagic).GetMethod("DeserializeObject");
-                System.Reflection.MethodInfo generic = method.MakeGenericMethod(objectType);
-
-                Object[] methodParams = new Object[1] { receivedMessage[2].ToByteArray() };
-
-                return generic.Invoke(null, methodParams);
-            }
-            else
-            {
-                return null;
-            }         
-        }
-
-        /// <summary>
         /// Thread which listens for incoming NetMQMessages from the server and queues them up for handling
         /// </summary>
         private void Listener()
@@ -142,7 +121,24 @@ namespace EasyNetwork
 
                 if (clientSocket.TryReceiveMultipartMessage(TimeSpan.FromSeconds(1.0), ref message))
                 {
-                    receiveQueue.Enqueue(message);                 
+                    string typeStr = message[1].ConvertToString();
+                    Type objectType = Type.GetType(typeStr);
+
+                    System.Reflection.MethodInfo method = typeof(BsonMagic).GetMethod("DeserializeObject");
+                    System.Reflection.MethodInfo generic = method.MakeGenericMethod(objectType);
+
+                    Object[] methodParams = new Object[1] { message[2].ToByteArray() };
+
+                    Object receivedObject = generic.Invoke(null, methodParams);
+
+                    if (DataReceived != null)
+                    {
+                        DataReceived(receivedObject);
+                    }
+                    else
+                    {
+                        throw new ArgumentException("Data was received, but no event handler set!");
+                    }   
                 }
             }
         }

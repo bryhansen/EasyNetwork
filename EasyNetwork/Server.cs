@@ -22,11 +22,17 @@
 namespace EasyNetwork
 {
     using System;
-    using System.Collections.Concurrent;
     using System.Collections.Generic;
     using System.Threading;
 
     using NetMQ;
+
+    /// <summary>
+    /// Delegate signature used for setting up DataReceived event
+    /// </summary>
+    /// <param name="receivedObject">Object received from client</param>
+    /// <param name="clientId">ID of the client that sent the object</param>
+    public delegate void ClientObjectReceived(Object receivedObject, Guid clientId);
 
     /// <summary>
     /// Server class which handles connections to any number of Clients
@@ -45,9 +51,6 @@ namespace EasyNetwork
         /// <summary> Flag used to know when to shut down listener thread </summary>
         private bool isDone = false;
 
-        /// <summary> String defining connection type, address, and port </summary>
-        private ConcurrentQueue<NetMQMessage> receiveQueue = new ConcurrentQueue<NetMQMessage>();
-
         /// <summary> List of all clients who have communicated with this server </summary>
         private List<Guid> clientList = new List<Guid>();
 
@@ -62,6 +65,9 @@ namespace EasyNetwork
             netMqSocket = context.CreateRouterSocket();
             netMqSocket.Bind(serverConnectionString);
         }
+
+        /// <summary> Event triggered each time the client receives an object from the server </summary>
+        public event ClientObjectReceived DataReceived;
 
         /// <summary>
         /// Gets the list of clients
@@ -94,34 +100,6 @@ namespace EasyNetwork
         }
 
         /// <summary>
-        /// Attempts to receive an object from a client
-        /// </summary>
-        /// <param name="clientId">Returns the ID of the client from which the object was received</param>
-        /// <returns>The object received, or NULL if there was nothing to receive</returns>
-        public Object Receive(out Guid clientId)
-        {
-            NetMQMessage netMqMsg = null;            
-
-            if (receiveQueue.TryDequeue(out netMqMsg))
-            {
-                clientId = new Guid(netMqMsg[0].ToByteArray());
-                string typeStr = netMqMsg[2].ConvertToString();
-                Type t = Type.GetType(typeStr);
-
-                System.Reflection.MethodInfo method = typeof(BsonMagic).GetMethod("DeserializeObject");
-                System.Reflection.MethodInfo generic = method.MakeGenericMethod(t);
-
-                Object[] methodParams = new Object[1] { netMqMsg[3].ToByteArray() };
-                return generic.Invoke(null, methodParams);
-            }
-            else
-            {
-                clientId = new Guid("00000000000000000000000000000000");
-                return null;
-            }
-        }
-
-        /// <summary>
         /// Send an object to a specified client
         /// </summary>
         /// <typeparam name="T">The type of the object being sent</typeparam>
@@ -148,20 +126,34 @@ namespace EasyNetwork
             while (!isDone)
             {
                 NetMQMessage receivedMsg = null;
-                bool result = netMqSocket.TryReceiveMultipartMessage(TimeSpan.FromSeconds(1.0), ref receivedMsg);
 
-                if (result)
+                if (netMqSocket.TryReceiveMultipartMessage(TimeSpan.FromSeconds(1.0), ref receivedMsg))
                 {
-                    // Add to client list if this is first time this ID has been seen
                     Guid receivedId = new Guid(receivedMsg[0].ToByteArray());
+                    string typeStr = receivedMsg[2].ConvertToString();
+                    Type t = Type.GetType(typeStr);
 
+                    System.Reflection.MethodInfo method = typeof(BsonMagic).GetMethod("DeserializeObject");
+                    System.Reflection.MethodInfo generic = method.MakeGenericMethod(t);
+
+                    Object[] methodParams = new Object[1] { receivedMsg[3].ToByteArray() };
+                    Object receivedObject = generic.Invoke(null, methodParams);
+
+                    // Add to client list if this is first time this ID has been seen
                     if (!clientList.Contains(receivedId))
                     {
                         clientList.Add(receivedId);
                     }
 
-                    // Enqueue for processing
-                    receiveQueue.Enqueue(receivedMsg);
+                    // Fire event if configured
+                    if (DataReceived != null)
+                    {
+                        DataReceived(receivedObject, receivedId);
+                    }
+                    else
+                    {
+                        throw new ArgumentException("Data was received, but no event handler set!");
+                    }
                 }
             }
         }

@@ -34,6 +34,18 @@ namespace EasyNetworkTests
     [TestClass]
     public class EasyNetworkUnitTests
     {
+        /// <summary> Holds the last object received by the clientOne objects in the tests </summary>
+        private Object clientOneDataReceived;
+
+        /// <summary> Holds the last object received by the clientTwo objects in the tests </summary>
+        private Object clientTwoDataReceived;
+
+        /// <summary> Data received by each of the clients in the test which pushes to many clients </summary>
+        private Dictionary<Guid, Object> dataReceivedPerClient = new Dictionary<Guid, Object>();
+
+        /// <summary> Holds objects received in the server and the corresponding client IDs </summary>
+        private List<Tuple<Object, Guid>> serverObjectsReceived = new List<Tuple<Object, Guid>>();
+
         /// <summary>
         /// Tests that multiple clients can send data to the server
         /// </summary>
@@ -43,6 +55,12 @@ namespace EasyNetworkTests
             EasyNetwork.Server server = new EasyNetwork.Server("tcp://*:1982");
             EasyNetwork.Client clientOne = new EasyNetwork.Client("tcp://localhost:1982");
             EasyNetwork.Client clientTwo = new EasyNetwork.Client("tcp://localhost:1982");
+
+            // Set up event handler on server
+            serverObjectsReceived.Clear();
+            server.DataReceived += Server_DataReceived;
+
+            // Build up some objects to send
             MyTestObject obj = new MyTestObject();
             obj.Value = 3.14159f;
             obj.Text = "Hello World!";
@@ -58,56 +76,48 @@ namespace EasyNetworkTests
             clientOne.Send<MyTestObject>(obj);
             clientTwo.Send<OtherTestObject>(obj2);
 
-            // Generically receive object at server from first client
-            Object receivedObject = null;
-            while (receivedObject == null)
+            // Wait for both objects to arrive at server
+            while (serverObjectsReceived.Count < 2)
             {
-                Guid firstId;
-                receivedObject = server.Receive(out firstId);
-
-                if (receivedObject is MyTestObject)
-                {
-                    MyTestObject actualObjectOne = receivedObject as MyTestObject;
-                    Assert.AreEqual(clientOne.Id, firstId);
-                    Assert.AreEqual(obj.Value, actualObjectOne.Value);
-                    Assert.AreEqual(obj.Text, actualObjectOne.Text);
-                }
-
                 Thread.Sleep(100);
             }
 
-            // Generically receive object at server from second client
-            receivedObject = null;            
-            while (receivedObject == null)
-            {
-                Guid secondId;
-                receivedObject = server.Receive(out secondId);
+            Assert.AreEqual(2, serverObjectsReceived.Count);
 
-                if (receivedObject is OtherTestObject)
-                {
-                    OtherTestObject actualObjectTwo = receivedObject as OtherTestObject;
-                    Assert.AreEqual(clientTwo.Id, secondId);
-                    Assert.AreEqual(obj2.Value, actualObjectTwo.Value);
-                    Assert.AreEqual(obj2.Text, actualObjectTwo.Text);
-                }
+            Assert.IsTrue(serverObjectsReceived[0].Item1 is MyTestObject);
+            MyTestObject actualObjectOne = serverObjectsReceived[0].Item1 as MyTestObject;
+            Assert.AreEqual(clientOne.Id, serverObjectsReceived[0].Item2);
+            Assert.AreEqual(obj.Value, actualObjectOne.Value);
+            Assert.AreEqual(obj.Text, actualObjectOne.Text);
 
-                Thread.Sleep(100);
-            }
+            Assert.IsTrue(serverObjectsReceived[1].Item1 is OtherTestObject);
+            OtherTestObject actualObjectTwo = serverObjectsReceived[1].Item1 as OtherTestObject;
+            Assert.AreEqual(clientTwo.Id, serverObjectsReceived[1].Item2);
+            Assert.AreEqual(obj2.Value, actualObjectTwo.Value);
+            Assert.AreEqual(obj2.Text, actualObjectTwo.Text);
 
             server.Stop();
             clientOne.Stop();
             clientTwo.Stop();       
         }
-        
+
         /// <summary>
         /// Verifies that the server can respond to requests from multiple clients
         /// </summary>
         [TestMethod]
-        public void ServerResponses()
+        public void ServerResponseEventHandlers()
         {
             EasyNetwork.Server server = new EasyNetwork.Server("tcp://*:1982");
             EasyNetwork.Client clientOne = new EasyNetwork.Client("tcp://localhost:1982");
             EasyNetwork.Client clientTwo = new EasyNetwork.Client("tcp://localhost:1982");
+
+            // Set up event handles
+            serverObjectsReceived.Clear();
+            server.DataReceived += Server_DataReceived;
+            clientOneDataReceived = null;
+            clientTwoDataReceived = null;
+            clientOne.DataReceived += ClientOne_DataReceived;
+            clientTwo.DataReceived += ClientTwo_DataReceived;
 
             server.Start();
             clientOne.Start();
@@ -120,35 +130,27 @@ namespace EasyNetworkTests
             clientOne.Send<MyTestObject>(clientOneMessage);
 
             // Server receives, handles, and responds to message
-            Object receivedObj = null;
-            while (receivedObj == null)
+            while (serverObjectsReceived.Count == 0)
             {
-                Guid receivedId;
-                receivedObj = server.Receive(out receivedId);
-
-                if (receivedObj is MyTestObject)
-                {
-                    MyTestObject receivedMessage = receivedObj as MyTestObject;
-                    MyTestObject responseMessage = new MyTestObject();
-                    responseMessage.Value = receivedMessage.Value * 2;
-                    responseMessage.Text = "Howdy client!";
-
-                    server.Send<MyTestObject>(receivedMessage, receivedId);                  
-                }
-
                 Thread.Sleep(100);
             }
+
+            Assert.IsTrue(serverObjectsReceived.Count > 0);
+            Assert.IsTrue(serverObjectsReceived[0].Item1 is MyTestObject);
+            MyTestObject receivedMessage = serverObjectsReceived[0].Item1 as MyTestObject;
+            MyTestObject responseMessage = new MyTestObject();
+            responseMessage.Value = receivedMessage.Value * 2;
+            responseMessage.Text = "Howdy client!";
+            server.Send<MyTestObject>(receivedMessage, serverObjectsReceived[0].Item2);
 
             Thread.Sleep(1000);
 
             // Make sure the second client didn't receive anything
-            Object clientTwoReceived = clientTwo.Receive();
-            Assert.IsNull(clientTwoReceived);
+            Assert.IsNull(clientTwoDataReceived);
 
             // The clientOne should have received the message destined for it
-            Object clientReceived = clientOne.Receive();
-            Assert.IsNotNull(clientReceived);
-            Assert.IsTrue(clientReceived is MyTestObject);
+            Assert.IsNotNull(clientOneDataReceived);
+            Assert.IsTrue(clientOneDataReceived is MyTestObject);
 
             server.Stop();
             clientOne.Stop();
@@ -162,12 +164,15 @@ namespace EasyNetworkTests
         public void PushToAllClients()
         {            
             EasyNetwork.Server server = new EasyNetwork.Server("tcp://*:1982");
+            server.DataReceived += Server_DataReceived;
+
             List<EasyNetwork.Client> clients = new List<EasyNetwork.Client>();
             const int NumClients = 10;
 
             for (int i = 0; i < NumClients; i++)
             {
                 clients.Add(new EasyNetwork.Client("tcp://localhost:1982"));
+                clients[clients.Count - 1].DataReceived += Clients_DataReceived;
             }
 
             server.Start();
@@ -204,13 +209,16 @@ namespace EasyNetworkTests
                 server.Send<MyTestObject>(helloFromServer, clientId);
             }
 
-            // Give a little time to make sure all the messages arrived...
-            Thread.Sleep(1000);
+            // Wait until the appropriate number of responses are received by clients
+            while (dataReceivedPerClient.Count < NumClients)
+            {
+                Thread.Sleep(100);
+            }
 
             // Make sure each client has received their personalized messages from the server
             foreach (EasyNetwork.Client client in clients)
             {
-                Object genericObject = client.Receive();
+                Object genericObject = dataReceivedPerClient[client.Id];
                 Assert.IsNotNull(genericObject);
 
                 if (genericObject is MyTestObject)
@@ -225,6 +233,47 @@ namespace EasyNetworkTests
             foreach (EasyNetwork.Client client in clients)
             {
                 client.Stop();
+            }
+        }
+
+        /// <summary>
+        /// Event handler for the server receiving objects from clients which just adds them to an accessible list
+        /// </summary>
+        /// <param name="receivedObject">Object received from client</param>
+        /// <param name="clientId">Client ID of client who sent the object</param>
+        private void Server_DataReceived(object receivedObject, Guid clientId)
+        {
+            serverObjectsReceived.Add(new Tuple<Object, Guid>(receivedObject, clientId));
+        }
+
+        /// <summary>
+        /// Handler for the DataReceived event for client one
+        /// </summary>
+        /// <param name="receivedObject">The object received from the server</param>
+        private void ClientOne_DataReceived(Object receivedObject)
+        {
+            clientOneDataReceived = receivedObject;
+        }
+
+        /// <summary>
+        /// Handler for the DataReceived event for client two
+        /// </summary>
+        /// <param name="receivedObject">The object received from the server</param>
+        private void ClientTwo_DataReceived(Object receivedObject)
+        {
+            clientTwoDataReceived = receivedObject;
+        }
+
+        /// <summary>
+        /// Event handler for receiving data for each client
+        /// </summary>
+        /// <param name="receivedObject">Received object from server</param>
+        private void Clients_DataReceived(object receivedObject)
+        {
+            if (receivedObject is MyTestObject)
+            {
+                MyTestObject serverMsg = receivedObject as MyTestObject;
+                dataReceivedPerClient.Add(new Guid(serverMsg.Text), serverMsg);
             }
         }
 
